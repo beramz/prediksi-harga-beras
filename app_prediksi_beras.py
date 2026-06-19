@@ -233,68 +233,96 @@ elif menu == "📂 Upload Data Excel/CSV":
 
             st.divider()
 
-            # ── TAHAP 2: Proses pembersihan ──
-            st.markdown("### 🧹 Tahap 2 — Pembersihan Data")
+            # ── TAHAP 2: Proses pembersihan & penataan ulang ──
+            st.markdown("### 🧹 Tahap 2 — Pembersihan & Penataan Ulang Data")
 
-            df_bersih = df_mentah.copy()
-            log_bersih = []
-
-            # 1. Cek kolom wajib
             if kolom_hilang:
                 st.error(f"❌ Kolom wajib tidak ditemukan: {kolom_hilang}. Periksa kembali file Anda.")
                 st.stop()
 
-            # 2. Konversi tanggal
+            df_bersih  = df_mentah.copy()
+            log_bersih = []
+
+            # 1. Konversi & validasi tanggal
             df_bersih['tanggal'] = pd.to_datetime(df_bersih['tanggal'], errors='coerce')
             n_tgl_error = df_bersih['tanggal'].isna().sum()
             if n_tgl_error > 0:
                 df_bersih = df_bersih.dropna(subset=['tanggal'])
                 log_bersih.append(f"Hapus {n_tgl_error} baris dengan format tanggal tidak valid")
             else:
-                log_bersih.append("✅ Format tanggal valid")
+                log_bersih.append("Format tanggal valid, tidak ada yang dihapus")
 
-            # 3. Hapus koma pada harga
-            for jenis in jenis_beras:
-                if jenis in df_bersih.columns:
-                    df_bersih[jenis] = df_bersih[jenis].astype(str).str.replace(',', '').str.strip()
-                    df_bersih[jenis] = pd.to_numeric(df_bersih[jenis], errors='coerce')
-            log_bersih.append("✅ Koma pemisah ribuan dihapus dan dikonversi ke angka")
-
-            # 4. Tangani missing value
-            n_missing_before = df_bersih[jenis_beras].isnull().sum().sum()
-            if n_missing_before > 0:
-                df_bersih[jenis_beras] = df_bersih[jenis_beras].interpolate(method='linear')
-                log_bersih.append(f"✅ {n_missing_before} nilai kosong diisi dengan interpolasi linear")
+            # 2. Hapus duplikat tanggal
+            n_dup = df_bersih.duplicated(subset=['tanggal']).sum()
+            if n_dup > 0:
+                df_bersih = df_bersih.drop_duplicates(subset=['tanggal'], keep='first')
+                log_bersih.append(f"Hapus {n_dup} baris duplikat tanggal")
             else:
-                log_bersih.append("✅ Tidak ada nilai kosong")
+                log_bersih.append("Tidak ada duplikat tanggal")
 
-            # 5. Urutkan berdasarkan tanggal
+            # 3. Bersihkan harga: hapus koma & konversi ke numerik
+            for jenis in jenis_beras:
+                df_bersih[jenis] = (df_bersih[jenis].astype(str)
+                                     .str.replace(',', '', regex=False)
+                                     .str.replace('Rp', '', regex=False)
+                                     .str.strip())
+                df_bersih[jenis] = pd.to_numeric(df_bersih[jenis], errors='coerce')
+            log_bersih.append("Koma/simbol Rp dihapus dari kolom harga, dikonversi ke numerik")
+
+            # 4. Urutkan berdasarkan tanggal (penataan ulang)
             df_bersih = df_bersih.sort_values('tanggal').reset_index(drop=True)
-            log_bersih.append("✅ Data diurutkan berdasarkan tanggal")
+            log_bersih.append("Data ditata ulang dan diurutkan berdasarkan tanggal")
 
-            # Tampilkan log pembersihan
+            # 5. Resampling harian — lengkapi tanggal yang hilang
+            tgl_awal = df_bersih['tanggal'].min()
+            tgl_akhir = df_bersih['tanggal'].max()
+            n_hari_seharusnya = (tgl_akhir - tgl_awal).days + 1
+            if len(df_bersih) < n_hari_seharusnya:
+                n_hilang = n_hari_seharusnya - len(df_bersih)
+                df_bersih = df_bersih.set_index('tanggal')
+                df_bersih = df_bersih.reindex(
+                    pd.date_range(tgl_awal, tgl_akhir, freq='D')
+                )
+                df_bersih.index.name = 'tanggal'
+                df_bersih = df_bersih.reset_index()
+                log_bersih.append(f"Tambahkan {n_hilang} baris tanggal yang hilang (resampling harian)")
+            else:
+                log_bersih.append("Tidak ada tanggal yang hilang, resampling tidak diperlukan")
+
+            # 6. Tangani missing value dengan interpolasi linear
+            n_missing = df_bersih[jenis_beras].isnull().sum().sum()
+            if n_missing > 0:
+                df_bersih[jenis_beras] = df_bersih[jenis_beras].interpolate(method='linear')
+                log_bersih.append(f"{n_missing} nilai kosong diisi dengan interpolasi linear")
+            else:
+                log_bersih.append("Tidak ada nilai kosong setelah resampling")
+
             for log in log_bersih:
-                st.markdown(f"- {log}")
+                st.markdown(f"- ✅ {log}")
 
             st.divider()
 
             # ── TAHAP 3: Preview data bersih ──
-            st.markdown("### ✅ Tahap 3 — Preview Data Setelah Dibersihkan")
+            st.markdown("### ✅ Tahap 3 — Preview Data Setelah Dibersihkan & Ditata Ulang")
             st.caption(f"Total baris valid: {len(df_bersih)}")
             st.dataframe(df_bersih.head(10), use_container_width=True, hide_index=True)
 
-            # Perbandingan sebelum vs sesudah
             col1, col2, col3 = st.columns(3)
             col1.metric("Baris sebelum", len(df_mentah))
             col2.metric("Baris sesudah", len(df_bersih))
-            col3.metric("Baris dihapus",
-                        len(df_mentah) - len(df_bersih),
-                        delta_color="inverse")
+            col3.metric("Selisih baris",
+                        len(df_bersih) - len(df_mentah))
+
+            csv_bersih = df_bersih.to_csv(index=False).encode('utf-8')
+            st.download_button("⬇️ Download Data yang Sudah Dibersihkan", csv_bersih,
+                               "data_bersih_hasil_upload.csv", "text/csv")
 
             st.divider()
 
             # ── TAHAP 4: Prediksi ──
             st.markdown("### 🔍 Tahap 4 — Hasil Prediksi")
+
+            df_gabung = pd.concat([df, df_bersih]).drop_duplicates('tanggal').sort_values('tanggal').reset_index(drop=True)
 
             jenis_pilih = st.multiselect("Pilih jenis beras:",
                                           jenis_beras,
@@ -302,8 +330,6 @@ elif menu == "📂 Upload Data Excel/CSV":
                                           format_func=lambda x: label_bersih[x])
 
             if jenis_pilih:
-                df_gabung = pd.concat([df, df_bersih]).drop_duplicates('tanggal').sort_values('tanggal').reset_index(drop=True)
-
                 n_col = 2 if len(jenis_pilih) > 1 else 1
                 cols  = st.columns(n_col)
 
@@ -313,15 +339,16 @@ elif menu == "📂 Upload Data Excel/CSV":
                     d_uji          = d_jenis[mask_upload]
 
                     if len(d_uji) == 0:
-                        st.warning(f"{label_bersih[jenis]}: tidak ada data yang bisa diprediksi")
+                        st.warning(f"{label_bersih[jenis]}: tidak ada data yang bisa diprediksi "
+                                   f"(kemungkinan tanggal terlalu dekat dengan awal data sehingga "
+                                   f"fitur lag/rolling belum dapat dihitung)")
                         continue
 
                     model  = models[jenis]['model']
                     y_pred = model.predict(d_uji[fitur])
                     y_act  = d_uji['harga'].values
-
-                    mae  = np.mean(np.abs(y_act - y_pred))
-                    mape = np.mean(np.abs((y_act - y_pred) / y_act)) * 100
+                    mae    = np.mean(np.abs(y_act - y_pred))
+                    mape   = np.mean(np.abs((y_act - y_pred) / y_act)) * 100
 
                     with cols[i % n_col]:
                         fig, ax = plt.subplots(figsize=(7, 3.5))
@@ -331,7 +358,7 @@ elif menu == "📂 Upload Data Excel/CSV":
                                 label='Prediksi', color='#EF6C00',
                                 linewidth=1.8, linestyle='--')
                         ax.set_title(
-                            f"{label_bersih[jenis]}  |  MAE: Rp{mae:,.0f}  |  MAPE: {mape:.2f}%",
+                            f"{label_bersih[jenis]} | MAE: Rp{mae:,.0f} | MAPE: {mape:.2f}%",
                             fontsize=10, fontweight='bold')
                         ax.set_ylabel('Harga (Rp/kg)')
                         ax.legend(fontsize=8)
@@ -343,6 +370,8 @@ elif menu == "📂 Upload Data Excel/CSV":
 
         except Exception as e:
             st.error(f"❌ Error memproses file: {e}")
+
+
 # ══════════════════════════════════════════════
 # 3. INPUT DATA MANUAL
 # ══════════════════════════════════════════════
