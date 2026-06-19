@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import joblib
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 # ─────────────────────────────────────────────
 # KONFIGURASI HALAMAN
@@ -16,24 +16,34 @@ st.set_page_config(
 )
 
 # ─────────────────────────────────────────────
-# LOAD MODEL & DATA
+# LOAD MODEL & DATA DEFAULT
 # ─────────────────────────────────────────────
 @st.cache_resource
 def load_model():
     return joblib.load("models_beras.pkl")
 
 @st.cache_data
-def load_data():
+def load_data_default():
     df = pd.read_csv("data_beras_bersih.csv")
     df["tanggal"] = pd.to_datetime(df["tanggal"])
     return df
 
 try:
     models = load_model()
-    df     = load_data()
+    df_default = load_data_default()
 except FileNotFoundError:
     st.error("❌ File models_beras.pkl atau data_beras_bersih.csv tidak ditemukan.")
     st.stop()
+
+# ─────────────────────────────────────────────
+# SESSION STATE — DATA AKTIF YANG DIPAKAI SEMUA MENU
+# ─────────────────────────────────────────────
+if 'df_aktif' not in st.session_state:
+    st.session_state.df_aktif = df_default
+if 'sumber_data' not in st.session_state:
+    st.session_state.sumber_data = "default"   # "default" atau "upload"
+if 'nama_file_aktif' not in st.session_state:
+    st.session_state.nama_file_aktif = None
 
 # ─────────────────────────────────────────────
 # KONFIGURASI LABEL & WARNA
@@ -53,45 +63,28 @@ warna = {
 # ─────────────────────────────────────────────
 # DETEKSI & TRANSPOSE FORMAT PIHPS (HORIZONTAL)
 # ─────────────────────────────────────────────
-def deteksi_format_horizontal(df_mentah):
-    """
-    Mendeteksi apakah file berformat horizontal ala PIHPS
-    (tanggal ada di kolom/header, jenis beras ada di baris).
-    """
+def deteksi_format_horizontal(df_check):
     kolom_wajib = ['tanggal', 'bawah_1', 'bawah_2',
                    'medium_1', 'medium_2', 'super_1', 'super_2']
-    kolom_vertikal_ada = all(k in df_mentah.columns for k in kolom_wajib)
-    if kolom_vertikal_ada:
+    if all(k in df_check.columns for k in kolom_wajib):
         return False
-
-    # Cek apakah baris pertama berisi pola nama beras PIHPS
-    teks_gabungan = df_mentah.astype(str).apply(lambda x: ' '.join(x), axis=1).str.lower()
+    teks_gabungan = df_check.astype(str).apply(lambda x: ' '.join(x), axis=1).str.lower()
     pola_beras = ['bawah', 'medium', 'super', 'beras']
     cocok = teks_gabungan.str.contains('|'.join(pola_beras)).sum()
     return cocok >= 2
 
 
-def transpose_format_pihps(df_mentah):
-    """
-    Mengubah data horizontal PIHPS (tanggal di header, jenis beras di baris)
-    menjadi format vertikal (tanggal di baris, jenis beras di kolom).
-    """
-    df_raw = pd.read_excel(df_mentah, header=None, engine='openpyxl') \
-        if hasattr(df_mentah, 'read') and df_mentah.name.endswith('.xlsx') \
-        else df_mentah
+def transpose_format_pihps(file_like):
+    df_raw = pd.read_excel(file_like, header=None, engine='openpyxl')
 
-    # Cari baris header tanggal — baris yang punya format dd/mm/yyyy terbanyak
-    baris_tanggal_idx = None
+    baris_tanggal_idx = 0
     for i in range(min(5, len(df_raw))):
         baris = df_raw.iloc[i].astype(str)
         n_match = baris.str.match(r'^\d{1,2}/?\s?\d{1,2}/?\s?\d{2,4}$').sum()
         if n_match >= 3:
             baris_tanggal_idx = i
             break
-    if baris_tanggal_idx is None:
-        baris_tanggal_idx = 0
 
-    # Cari kolom mulai data tanggal (lewati kolom No & Komoditas)
     kolom_mulai = 2
     for c in range(min(5, df_raw.shape[1])):
         val = str(df_raw.iloc[baris_tanggal_idx, c])
@@ -102,7 +95,6 @@ def transpose_format_pihps(df_mentah):
     tanggal_raw = df_raw.iloc[baris_tanggal_idx, kolom_mulai:].tolist()
     tanggal = pd.to_datetime(tanggal_raw, dayfirst=True, errors='coerce')
 
-    # Cari baris tiap jenis beras berdasarkan nama
     mapping_nama = {
         'bawah i'  : 'bawah_1', 'bawah ii' : 'bawah_2',
         'medium i' : 'medium_1', 'medium ii': 'medium_2',
@@ -121,6 +113,61 @@ def transpose_format_pihps(df_mentah):
     df_vertikal = pd.DataFrame(hasil)
     df_vertikal = df_vertikal.dropna(subset=['tanggal']).reset_index(drop=True)
     return df_vertikal
+
+
+def bersihkan_dan_tata_ulang(df_mentah):
+    """Pembersihan & penataan ulang data. Mengembalikan (df_bersih, log_list)."""
+    df_bersih  = df_mentah.copy()
+    log_bersih = []
+
+    df_bersih['tanggal'] = pd.to_datetime(df_bersih['tanggal'], errors='coerce')
+    n_tgl_error = df_bersih['tanggal'].isna().sum()
+    if n_tgl_error > 0:
+        df_bersih = df_bersih.dropna(subset=['tanggal'])
+        log_bersih.append(f"Hapus {n_tgl_error} baris dengan format tanggal tidak valid")
+    else:
+        log_bersih.append("Format tanggal valid, tidak ada yang dihapus")
+
+    n_dup = df_bersih.duplicated(subset=['tanggal']).sum()
+    if n_dup > 0:
+        df_bersih = df_bersih.drop_duplicates(subset=['tanggal'], keep='first')
+        log_bersih.append(f"Hapus {n_dup} baris duplikat tanggal")
+    else:
+        log_bersih.append("Tidak ada duplikat tanggal")
+
+    for jenis in jenis_beras:
+        df_bersih[jenis] = (df_bersih[jenis].astype(str)
+                             .str.replace(',', '', regex=False)
+                             .str.replace('Rp', '', regex=False)
+                             .str.strip())
+        df_bersih[jenis] = pd.to_numeric(df_bersih[jenis], errors='coerce')
+    log_bersih.append("Koma/simbol Rp dihapus dari kolom harga, dikonversi ke numerik")
+
+    df_bersih = df_bersih.sort_values('tanggal').reset_index(drop=True)
+    log_bersih.append("Data ditata ulang dan diurutkan berdasarkan tanggal")
+
+    if len(df_bersih) > 1:
+        tgl_awal  = df_bersih['tanggal'].min()
+        tgl_akhir = df_bersih['tanggal'].max()
+        n_hari_seharusnya = (tgl_akhir - tgl_awal).days + 1
+        if len(df_bersih) < n_hari_seharusnya:
+            n_hilang = n_hari_seharusnya - len(df_bersih)
+            df_bersih = df_bersih.set_index('tanggal')
+            df_bersih = df_bersih.reindex(pd.date_range(tgl_awal, tgl_akhir, freq='D'))
+            df_bersih.index.name = 'tanggal'
+            df_bersih = df_bersih.reset_index()
+            log_bersih.append(f"Tambahkan {n_hilang} baris tanggal yang hilang (resampling harian)")
+        else:
+            log_bersih.append("Tidak ada tanggal yang hilang, resampling tidak diperlukan")
+
+    n_missing = df_bersih[jenis_beras].isnull().sum().sum()
+    if n_missing > 0:
+        df_bersih[jenis_beras] = df_bersih[jenis_beras].interpolate(method='linear')
+        log_bersih.append(f"{n_missing} nilai kosong diisi dengan interpolasi linear")
+    else:
+        log_bersih.append("Tidak ada nilai kosong setelah resampling")
+
+    return df_bersih, log_bersih
 
 
 # ─────────────────────────────────────────────
@@ -174,24 +221,55 @@ def prediksi_ke_depan(df, jenis, model, fitur, n_hari=30):
     future_dates = pd.date_range(start=last_date + timedelta(days=1), periods=n_hari)
     return future_dates, preds
 
+def hitung_metrik(df_aktif, jenis):
+    """Hitung MAE/RMSE/MAPE pada df_aktif. Pakai model dari GitHub."""
+    d_jenis, fitur = buat_fitur(df_aktif, jenis)
+    _, test = split_data(d_jenis)
+    if len(test) == 0:
+        return None
+    model  = models[jenis]['model']
+    y_pred = model.predict(test[fitur])
+    y_test = test['harga'].values
+    mae  = np.mean(np.abs(y_test - y_pred))
+    rmse = np.sqrt(np.mean((y_test - y_pred) ** 2))
+    mape = np.mean(np.abs((y_test - y_pred) / y_test)) * 100
+    return {
+        'MAE': mae, 'RMSE': rmse, 'MAPE': mape,
+        'test_dates': test['tanggal'].values,
+        'y_test': y_test, 'y_pred': y_pred,
+    }
+
 # ─────────────────────────────────────────────
 # SIDEBAR NAVIGASI
 # ─────────────────────────────────────────────
 with st.sidebar:
-    st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/9/9b/Rice_Paddy.jpg/320px-Rice_Paddy.jpg",
-             use_column_width=True)
     st.markdown("## 🌾 Menu Navigasi")
     menu = st.radio("Pilih halaman:", [
         "🏠 Beranda",
         "📂 Upload Data Excel/CSV",
-        "✏️ Input Data Manual",
+        "🔍 Cari prediksi",
         "📈 Tren Harga",
         "🎯 Aktual vs Prediksi",
         "📊 Evaluasi Model",
         "🔮 Prediksi ke Depan",
     ])
     st.divider()
+
+    # Indikator sumber data aktif
+    if st.session_state.sumber_data == "upload":
+        st.success(f"📤 Memakai data upload:\n**{st.session_state.nama_file_aktif}**")
+        if st.button("↩️ Kembali ke data default"):
+            st.session_state.df_aktif = df_default
+            st.session_state.sumber_data = "default"
+            st.session_state.nama_file_aktif = None
+            st.rerun()
+    else:
+        st.info("📌 Memakai data default (PIHPS 2025)")
+
+    st.divider()
     st.caption("Bramadita Rahardiyan Purnama\n220103196 | 2026")
+
+df = st.session_state.df_aktif   # ← seluruh menu di bawah memakai variabel ini
 
 
 # ══════════════════════════════════════════════
@@ -207,52 +285,43 @@ if menu == "🏠 Beranda":
         st.markdown("""
         Aplikasi ini merupakan implementasi model **Random Forest Regression**
         untuk memprediksi harga beras di Provinsi Jawa Tengah berdasarkan
-        data harga harian dari **Pusat Informasi Harga Pangan Strategis (PIHPS)**
-        periode Januari hingga Desember 2025.
+        data harga harian dari **Pusat Informasi Harga Pangan Strategis (PIHPS)**.
+
+        Seluruh menu (Tren Harga, Aktual vs Prediksi, Evaluasi Model, dan
+        Prediksi ke Depan) akan otomatis menggunakan data yang Anda upload
+        di menu **Upload Data Excel/CSV**. Jika belum ada data yang diupload,
+        seluruh menu menggunakan data historis default (PIHPS 2025).
 
         **Jenis beras yang diprediksi:**
         - Beras Kualitas Bawah I & II
         - Beras Kualitas Medium I & II
         - Beras Kualitas Super I & II
         """)
-
     with col2:
-        st.metric("Total Data", "365 hari")
+        st.metric("Total Data Aktif", f"{len(df)} hari")
         st.metric("Jenis Beras", "6 jenis")
-        st.metric("Rata-rata MAPE", "0.93%")
+        st.metric("Sumber Data", "Upload" if st.session_state.sumber_data == "upload" else "Default")
 
     st.divider()
     st.markdown("### 📋 Panduan Penggunaan")
-
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.info("**📂 Upload Data**\nUpload file Excel/CSV untuk prediksi batch sekaligus")
+        st.info("**📂 Upload Data**\nGanti data acuan seluruh menu dengan data Anda sendiri")
     with col2:
         st.info("**✏️ Input Manual**\nPilih jenis beras dan tanggal untuk prediksi satu per satu")
     with col3:
-        st.info("**📈 Tren Harga**\nLihat grafik pergerakan harga beras sepanjang 2025")
+        st.info("**📈 Tren Harga**\nLihat grafik pergerakan harga beras")
     with col4:
-        st.info("**🔮 Prediksi**\nLihat prediksi harga beras hingga 30 hari ke depan")
-
-    st.divider()
-    st.markdown("### 📊 Ringkasan Dataset")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Periode Data", "Jan – Des 2025")
-    with col2:
-        st.metric("Sumber Data", "PIHPS Nasional")
-    with col3:
-        st.metric("Algoritma", "Random Forest Regression")
+        st.info("**🔮 Prediksi**\nLihat prediksi harga hingga 30 hari ke depan")
 
 
 # ══════════════════════════════════════════════
 # 2. UPLOAD DATA EXCEL/CSV
 # ══════════════════════════════════════════════
 elif menu == "📂 Upload Data Excel/CSV":
-    st.title("📂 Upload Data untuk Prediksi")
-    st.caption("Upload file Excel atau CSV untuk mendapatkan hasil prediksi.")
+    st.title("📂 Upload Data Excel/CSV")
+    st.caption("Data yang diupload di sini akan menjadi data acuan untuk SEMUA menu di aplikasi ini.")
 
-    # Template download
     st.markdown("#### Format file yang diperlukan:")
     df_contoh = pd.DataFrame({
         'tanggal'  : ['2025-01-01', '2025-01-02', '2025-01-03'],
@@ -267,153 +336,79 @@ elif menu == "📂 Upload Data Excel/CSV":
     csv_template = df_contoh.to_csv(index=False).encode('utf-8')
     st.download_button("⬇️ Download Template CSV", csv_template,
                        "template_data_beras.csv", "text/csv")
+    st.caption("Format horizontal ala PIHPS (tanggal di kolom, jenis beras di baris) juga didukung dan akan ditransformasi otomatis.")
 
     st.divider()
     uploaded_file = st.file_uploader("Upload file di sini", type=["xlsx", "csv"])
 
     if uploaded_file:
         try:
-            # ── TAHAP 0: Baca file & deteksi format ──
+            # ── TAHAP 0: Deteksi format ──
             if uploaded_file.name.endswith('.csv'):
-                df_cek = pd.read_csv(uploaded_file, header=None)
+                df_cek_format = pd.read_csv(uploaded_file)
             else:
-                df_cek = pd.read_excel(uploaded_file, header=None, engine='openpyxl')
+                df_cek_format = pd.read_excel(uploaded_file)
+            uploaded_file.seek(0)
 
-            format_horizontal = deteksi_format_horizontal(
-                pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv')
-                else pd.read_excel(uploaded_file)
-            )
+            format_horizontal = deteksi_format_horizontal(df_cek_format)
 
             if format_horizontal:
-                st.info("🔄 Terdeteksi format data horizontal (gaya PIHPS — tanggal di kolom, "
-                        "jenis beras di baris). Data akan ditransformasi ke format vertikal secara otomatis.")
-                uploaded_file.seek(0)
+                st.info("🔄 Terdeteksi format horizontal (gaya PIHPS). Data akan ditransformasi otomatis ke format vertikal.")
                 if uploaded_file.name.endswith('.xlsx'):
                     df_mentah = transpose_format_pihps(uploaded_file)
                 else:
-                    # Untuk CSV horizontal, baca dulu sebagai raw lalu transpose manual
                     df_raw_csv = pd.read_csv(uploaded_file, header=None)
                     tmp_path = "_tmp_upload.xlsx"
                     df_raw_csv.to_excel(tmp_path, header=False, index=False)
                     with open(tmp_path, 'rb') as f:
                         df_mentah = transpose_format_pihps(f)
-
-                st.success(f"✅ Berhasil ditransformasi ke format vertikal: {len(df_mentah)} baris, "
-                           f"{len(df_mentah.columns)} kolom")
+                st.success(f"✅ Berhasil ditransformasi: {len(df_mentah)} baris, {len(df_mentah.columns)} kolom")
             else:
-                uploaded_file.seek(0)
-                if uploaded_file.name.endswith('.csv'):
-                    df_mentah = pd.read_csv(uploaded_file)
-                else:
-                    df_mentah = pd.read_excel(uploaded_file)
+                df_mentah = df_cek_format
 
-            # ── TAHAP 1: Preview data ──
+            # ── TAHAP 1: Preview ──
             st.markdown("### 📋 Tahap 1 — Preview Data")
             st.caption(f"Total baris: {len(df_mentah)} | Total kolom: {len(df_mentah.columns)}")
             st.dataframe(df_mentah.head(10), use_container_width=True, hide_index=True)
 
-            # Cek masalah awal
-            masalah = []
             kolom_wajib = ['tanggal', 'bawah_1', 'bawah_2',
                            'medium_1', 'medium_2', 'super_1', 'super_2']
             kolom_hilang = [k for k in kolom_wajib if k not in df_mentah.columns]
+
+            masalah = []
             if kolom_hilang:
                 masalah.append(f"Kolom tidak ditemukan: {kolom_hilang}")
             if df_mentah.isnull().sum().sum() > 0:
                 masalah.append(f"Ditemukan {df_mentah.isnull().sum().sum()} nilai kosong")
-            for jenis in jenis_beras:
-                if jenis in df_mentah.columns:
-                    n_koma = df_mentah[jenis].astype(str).str.contains(',').sum()
-                    if n_koma > 0:
-                        masalah.append(f"Kolom {jenis}: {n_koma} baris berformat teks dengan koma")
 
             if masalah:
-                st.warning("⚠️ Ditemukan masalah pada data mentah:\n" +
-                           "\n".join([f"- {m}" for m in masalah]))
+                st.warning("⚠️ Ditemukan masalah pada data:\n" + "\n".join([f"- {m}" for m in masalah]))
             else:
-                st.success("✅ Tidak ditemukan masalah pada data mentah")
-
-            st.divider()
-
-            # ── TAHAP 2: Proses pembersihan & penataan ulang ──
-            st.markdown("### 🧹 Tahap 2 — Pembersihan & Penataan Ulang Data")
+                st.success("✅ Tidak ditemukan masalah pada data")
 
             if kolom_hilang:
                 st.error(f"❌ Kolom wajib tidak ditemukan: {kolom_hilang}. Periksa kembali file Anda.")
                 st.stop()
 
-            df_bersih  = df_mentah.copy()
-            log_bersih = []
+            st.divider()
 
-            # 1. Konversi & validasi tanggal
-            df_bersih['tanggal'] = pd.to_datetime(df_bersih['tanggal'], errors='coerce')
-            n_tgl_error = df_bersih['tanggal'].isna().sum()
-            if n_tgl_error > 0:
-                df_bersih = df_bersih.dropna(subset=['tanggal'])
-                log_bersih.append(f"Hapus {n_tgl_error} baris dengan format tanggal tidak valid")
-            else:
-                log_bersih.append("Format tanggal valid, tidak ada yang dihapus")
-
-            # 2. Hapus duplikat tanggal
-            n_dup = df_bersih.duplicated(subset=['tanggal']).sum()
-            if n_dup > 0:
-                df_bersih = df_bersih.drop_duplicates(subset=['tanggal'], keep='first')
-                log_bersih.append(f"Hapus {n_dup} baris duplikat tanggal")
-            else:
-                log_bersih.append("Tidak ada duplikat tanggal")
-
-            # 3. Bersihkan harga: hapus koma & konversi ke numerik
-            for jenis in jenis_beras:
-                df_bersih[jenis] = (df_bersih[jenis].astype(str)
-                                     .str.replace(',', '', regex=False)
-                                     .str.replace('Rp', '', regex=False)
-                                     .str.strip())
-                df_bersih[jenis] = pd.to_numeric(df_bersih[jenis], errors='coerce')
-            log_bersih.append("Koma/simbol Rp dihapus dari kolom harga, dikonversi ke numerik")
-
-            # 4. Urutkan berdasarkan tanggal (penataan ulang)
-            df_bersih = df_bersih.sort_values('tanggal').reset_index(drop=True)
-            log_bersih.append("Data ditata ulang dan diurutkan berdasarkan tanggal")
-
-            # 5. Resampling harian — lengkapi tanggal yang hilang
-            tgl_awal = df_bersih['tanggal'].min()
-            tgl_akhir = df_bersih['tanggal'].max()
-            n_hari_seharusnya = (tgl_akhir - tgl_awal).days + 1
-            if len(df_bersih) < n_hari_seharusnya:
-                n_hilang = n_hari_seharusnya - len(df_bersih)
-                df_bersih = df_bersih.set_index('tanggal')
-                df_bersih = df_bersih.reindex(
-                    pd.date_range(tgl_awal, tgl_akhir, freq='D')
-                )
-                df_bersih.index.name = 'tanggal'
-                df_bersih = df_bersih.reset_index()
-                log_bersih.append(f"Tambahkan {n_hilang} baris tanggal yang hilang (resampling harian)")
-            else:
-                log_bersih.append("Tidak ada tanggal yang hilang, resampling tidak diperlukan")
-
-            # 6. Tangani missing value dengan interpolasi linear
-            n_missing = df_bersih[jenis_beras].isnull().sum().sum()
-            if n_missing > 0:
-                df_bersih[jenis_beras] = df_bersih[jenis_beras].interpolate(method='linear')
-                log_bersih.append(f"{n_missing} nilai kosong diisi dengan interpolasi linear")
-            else:
-                log_bersih.append("Tidak ada nilai kosong setelah resampling")
-
+            # ── TAHAP 2: Pembersihan & penataan ulang ──
+            st.markdown("### 🧹 Tahap 2 — Pembersihan & Penataan Ulang Data")
+            df_bersih, log_bersih = bersihkan_dan_tata_ulang(df_mentah)
             for log in log_bersih:
                 st.markdown(f"- ✅ {log}")
 
             st.divider()
 
             # ── TAHAP 3: Preview data bersih ──
-            st.markdown("### ✅ Tahap 3 — Preview Data Setelah Dibersihkan & Ditata Ulang")
+            st.markdown("### ✅ Tahap 3 — Preview Data Setelah Dibersihkan")
             st.caption(f"Total baris valid: {len(df_bersih)}")
             st.dataframe(df_bersih.head(10), use_container_width=True, hide_index=True)
 
             col1, col2, col3 = st.columns(3)
             col1.metric("Baris sebelum", len(df_mentah))
             col2.metric("Baris sesudah", len(df_bersih))
-            col3.metric("Selisih baris",
-                        len(df_bersih) - len(df_mentah))
+            col3.metric("Selisih baris", len(df_bersih) - len(df_mentah))
 
             csv_bersih = df_bersih.to_csv(index=False).encode('utf-8')
             st.download_button("⬇️ Download Data yang Sudah Dibersihkan", csv_bersih,
@@ -421,54 +416,22 @@ elif menu == "📂 Upload Data Excel/CSV":
 
             st.divider()
 
-            # ── TAHAP 4: Prediksi ──
-            st.markdown("### 🔍 Tahap 4 — Hasil Prediksi")
+            # ── TAHAP 4: Aktifkan data ke seluruh menu ──
+            st.markdown("### 🚀 Tahap 4 — Aktifkan Data Ini ke Seluruh Aplikasi")
+            st.caption("Setelah diaktifkan, menu Tren Harga, Aktual vs Prediksi, Evaluasi Model, "
+                       "Input Manual, dan Prediksi ke Depan akan otomatis menggunakan data ini. "
+                       "Model Random Forest yang dipakai tetap model acuan (tidak dilatih ulang).")
 
-            df_gabung = pd.concat([df, df_bersih]).drop_duplicates('tanggal').sort_values('tanggal').reset_index(drop=True)
+            if len(df_bersih) < 35:
+                st.warning("⚠️ Data kurang dari 35 hari — fitur lag/rolling 30 hari mungkin "
+                           "tidak dapat dihitung sepenuhnya, sehingga sebagian menu bisa kosong.")
 
-            jenis_pilih = st.multiselect("Pilih jenis beras:",
-                                          jenis_beras,
-                                          default=jenis_beras,
-                                          format_func=lambda x: label_bersih[x])
-
-            if jenis_pilih:
-                n_col = 2 if len(jenis_pilih) > 1 else 1
-                cols  = st.columns(n_col)
-
-                for i, jenis in enumerate(jenis_pilih):
-                    d_jenis, fitur = buat_fitur(df_gabung, jenis)
-                    mask_upload    = d_jenis['tanggal'].isin(df_bersih['tanggal'])
-                    d_uji          = d_jenis[mask_upload]
-
-                    if len(d_uji) == 0:
-                        st.warning(f"{label_bersih[jenis]}: tidak ada data yang bisa diprediksi "
-                                   f"(kemungkinan tanggal terlalu dekat dengan awal data sehingga "
-                                   f"fitur lag/rolling belum dapat dihitung)")
-                        continue
-
-                    model  = models[jenis]['model']
-                    y_pred = model.predict(d_uji[fitur])
-                    y_act  = d_uji['harga'].values
-                    mae    = np.mean(np.abs(y_act - y_pred))
-                    mape   = np.mean(np.abs((y_act - y_pred) / y_act)) * 100
-
-                    with cols[i % n_col]:
-                        fig, ax = plt.subplots(figsize=(7, 3.5))
-                        ax.plot(d_uji['tanggal'], y_act,
-                                label='Aktual', color='#1565C0', linewidth=2)
-                        ax.plot(d_uji['tanggal'], y_pred,
-                                label='Prediksi', color='#EF6C00',
-                                linewidth=1.8, linestyle='--')
-                        ax.set_title(
-                            f"{label_bersih[jenis]} | MAE: Rp{mae:,.0f} | MAPE: {mape:.2f}%",
-                            fontsize=10, fontweight='bold')
-                        ax.set_ylabel('Harga (Rp/kg)')
-                        ax.legend(fontsize=8)
-                        ax.grid(axis='y', alpha=0.3)
-                        ax.tick_params(axis='x', rotation=30)
-                        plt.tight_layout()
-                        st.pyplot(fig)
-                        plt.close()
+            if st.button("✅ Gunakan Data Ini untuk Semua Menu", type="primary"):
+                st.session_state.df_aktif       = df_bersih
+                st.session_state.sumber_data    = "upload"
+                st.session_state.nama_file_aktif = uploaded_file.name
+                st.success("Data berhasil diaktifkan! Buka menu lain di sidebar untuk melihat hasilnya.")
+                st.rerun()
 
         except Exception as e:
             st.error(f"❌ Error memproses file: {e}")
@@ -479,12 +442,15 @@ elif menu == "📂 Upload Data Excel/CSV":
 # ══════════════════════════════════════════════
 elif menu == "✏️ Input Data Manual":
     st.title("✏️ Input Data Manual")
-    st.caption("Pilih jenis beras dan tanggal untuk mendapatkan prediksi harga.")
+    st.caption("Pilih jenis beras dan tanggal untuk mendapatkan prediksi harga, berdasarkan data aktif saat ini.")
+
+    if len(df) < 31:
+        st.warning("⚠️ Data aktif kurang dari 31 hari, prediksi mungkin tidak dapat dihitung.")
+        st.stop()
 
     col1, col2 = st.columns(2)
     with col1:
-        jenis_pilih = st.selectbox("Pilih jenis beras:",
-                                    jenis_beras,
+        jenis_pilih = st.selectbox("Pilih jenis beras:", jenis_beras,
                                     format_func=lambda x: label_bersih[x])
     with col2:
         tgl_min = df['tanggal'].iloc[-1] + timedelta(days=1)
@@ -495,21 +461,16 @@ elif menu == "✏️ Input Data Manual":
                                        max_value=tgl_max.date())
 
     if st.button("🔍 Prediksi Harga", type="primary"):
-        # Hitung berapa hari ke depan dari data terakhir
-        last_date  = df['tanggal'].iloc[-1]
+        last_date   = df['tanggal'].iloc[-1]
         target_date = pd.Timestamp(tanggal_input)
-        n_hari     = (target_date - last_date).days
+        n_hari      = (target_date - last_date).days
 
         if n_hari <= 0:
             st.error("Tanggal yang dipilih harus setelah tanggal data terakhir.")
         else:
-            model  = models[jenis_pilih]['model']
-            fitur  = models[jenis_pilih]['fitur']
-
-            future_dates, future_preds = prediksi_ke_depan(
-                df, jenis_pilih, model, fitur, n_hari=n_hari
-            )
-
+            model = models[jenis_pilih]['model']
+            fitur = models[jenis_pilih]['fitur']
+            future_dates, future_preds = prediksi_ke_depan(df, jenis_pilih, model, fitur, n_hari=n_hari)
             harga_prediksi = future_preds[-1]
 
             st.divider()
@@ -518,7 +479,6 @@ elif menu == "✏️ Input Data Manual":
             col2.metric("Tanggal Prediksi", target_date.strftime('%d %B %Y'))
             col3.metric("Harga Prediksi", f"Rp{harga_prediksi:,.0f}/kg")
 
-            # Grafik tren + prediksi
             fig, ax = plt.subplots(figsize=(14, 5))
             ax.plot(df['tanggal'].iloc[-60:], df[jenis_pilih].iloc[-60:],
                     label='Historis', color='#1565C0', linewidth=2)
@@ -526,15 +486,12 @@ elif menu == "✏️ Input Data Manual":
                     label='Prediksi', color='#EF6C00',
                     linewidth=1.8, linestyle='--', marker='o', markersize=4)
             ax.axvline(last_date, color='gray', linestyle=':', linewidth=1.5)
-            ax.scatter([target_date], [harga_prediksi],
-                       color='red', s=100, zorder=5,
+            ax.scatter([target_date], [harga_prediksi], color='red', s=100, zorder=5,
                        label=f'Target: Rp{harga_prediksi:,.0f}')
             ax.set_title(f'Prediksi Harga {label_bersih[jenis_pilih]} — {target_date.strftime("%d %b %Y")}',
                          fontsize=13, fontweight='bold')
-            ax.set_xlabel('Tanggal')
-            ax.set_ylabel('Harga (Rp/kg)')
-            ax.legend()
-            ax.grid(axis='y', alpha=0.3)
+            ax.set_xlabel('Tanggal'); ax.set_ylabel('Harga (Rp/kg)')
+            ax.legend(); ax.grid(axis='y', alpha=0.3)
             plt.tight_layout()
             st.pyplot(fig)
             plt.close()
@@ -545,25 +502,20 @@ elif menu == "✏️ Input Data Manual":
 # ══════════════════════════════════════════════
 elif menu == "📈 Tren Harga":
     st.title("📈 Tren Harga Beras Harian")
-    st.caption("Jawa Tengah, Januari – Desember 2025 | Sumber: PIHPS Nasional")
+    st.caption(f"Data aktif: {df['tanggal'].iloc[0].strftime('%d %b %Y')} – "
+               f"{df['tanggal'].iloc[-1].strftime('%d %b %Y')} ({len(df)} hari)")
 
-    jenis_pilih = st.multiselect("Pilih jenis beras:",
-                                  jenis_beras,
-                                  default=jenis_beras,
-                                  format_func=lambda x: label_bersih[x])
+    jenis_pilih = st.multiselect("Pilih jenis beras:", jenis_beras,
+                                  default=jenis_beras, format_func=lambda x: label_bersih[x])
 
     if jenis_pilih:
         fig, ax = plt.subplots(figsize=(16, 5))
         for jenis in jenis_pilih:
-            ax.plot(df['tanggal'], df[jenis],
-                    label=label_bersih[jenis],
+            ax.plot(df['tanggal'], df[jenis], label=label_bersih[jenis],
                     color=warna[jenis], linewidth=1.5)
-        ax.set_title('Tren Harga Beras Harian — Jawa Tengah 2025',
-                     fontsize=14, fontweight='bold')
-        ax.set_xlabel('Tanggal')
-        ax.set_ylabel('Harga (Rp/kg)')
-        ax.legend(ncol=3)
-        ax.grid(axis='y', alpha=0.3)
+        ax.set_title('Tren Harga Beras Harian', fontsize=14, fontweight='bold')
+        ax.set_xlabel('Tanggal'); ax.set_ylabel('Harga (Rp/kg)')
+        ax.legend(ncol=3); ax.grid(axis='y', alpha=0.3)
         plt.tight_layout()
         st.pyplot(fig)
         plt.close()
@@ -573,14 +525,13 @@ elif menu == "📈 Tren Harga":
         stat_rows = []
         for jenis in jenis_pilih:
             stat_rows.append({
-                'Jenis Beras'   : label_bersih[jenis],
-                'Harga Min'     : f"Rp{df[jenis].min():,.0f}",
-                'Harga Max'     : f"Rp{df[jenis].max():,.0f}",
-                'Rata-rata'     : f"Rp{df[jenis].mean():,.0f}",
-                'Std Deviasi'   : f"Rp{df[jenis].std():,.0f}",
+                'Jenis Beras' : label_bersih[jenis],
+                'Harga Min'   : f"Rp{df[jenis].min():,.0f}",
+                'Harga Max'   : f"Rp{df[jenis].max():,.0f}",
+                'Rata-rata'   : f"Rp{df[jenis].mean():,.0f}",
+                'Std Deviasi' : f"Rp{df[jenis].std():,.0f}",
             })
-        st.dataframe(pd.DataFrame(stat_rows),
-                     use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(stat_rows), use_container_width=True, hide_index=True)
 
 
 # ══════════════════════════════════════════════
@@ -588,39 +539,35 @@ elif menu == "📈 Tren Harga":
 # ══════════════════════════════════════════════
 elif menu == "🎯 Aktual vs Prediksi":
     st.title("🎯 Aktual vs Prediksi Random Forest")
-    st.caption("Perbandingan harga aktual dan hasil prediksi pada data uji (20%) periode Nov–Des 2025")
+    st.caption("Perbandingan harga aktual dan hasil prediksi pada 20% data terakhir dari data aktif.")
 
-    jenis_pilih = st.multiselect("Pilih jenis beras:",
-                                  jenis_beras,
-                                  default=jenis_beras,
-                                  format_func=lambda x: label_bersih[x])
+    if len(df) < 40:
+        st.warning("⚠️ Data aktif terlalu sedikit untuk menghitung evaluasi yang representatif.")
+        st.stop()
+
+    jenis_pilih = st.multiselect("Pilih jenis beras:", jenis_beras,
+                                  default=jenis_beras, format_func=lambda x: label_bersih[x])
 
     if jenis_pilih:
         n_col = 2 if len(jenis_pilih) > 1 else 1
         cols  = st.columns(n_col)
 
         for i, jenis in enumerate(jenis_pilih):
-            d_jenis, fitur = buat_fitur(df, jenis)
-            _, test        = split_data(d_jenis)
-            model          = models[jenis]['model']
-            y_pred         = model.predict(test[fitur])
-            y_test         = test['harga'].values
-            dates          = pd.to_datetime(test['tanggal'])
-            mask           = dates <= '2025-12-31'
+            hasil = hitung_metrik(df, jenis)
+            if hasil is None:
+                st.warning(f"{label_bersih[jenis]}: data tidak cukup untuk evaluasi")
+                continue
 
             with cols[i % n_col]:
                 fig, ax = plt.subplots(figsize=(7, 3.5))
-                ax.plot(dates[mask], y_test[mask],
-                        label='Aktual', color='#1565C0', linewidth=2)
-                ax.plot(dates[mask], y_pred[mask],
-                        label='Prediksi', color='#EF6C00',
+                dates = pd.to_datetime(hasil['test_dates'])
+                ax.plot(dates, hasil['y_test'], label='Aktual', color='#1565C0', linewidth=2)
+                ax.plot(dates, hasil['y_pred'], label='Prediksi', color='#EF6C00',
                         linewidth=1.8, linestyle='--')
-                ax.set_title(
-                    f"{label_bersih[jenis]}  |  MAPE: {models[jenis]['MAPE']:.2f}%",
-                    fontsize=11, fontweight='bold')
+                ax.set_title(f"{label_bersih[jenis]}  |  MAPE: {hasil['MAPE']:.2f}%",
+                             fontsize=11, fontweight='bold')
                 ax.set_ylabel('Harga (Rp/kg)')
-                ax.legend(fontsize=8)
-                ax.grid(axis='y', alpha=0.3)
+                ax.legend(fontsize=8); ax.grid(axis='y', alpha=0.3)
                 ax.tick_params(axis='x', rotation=30)
                 plt.tight_layout()
                 st.pyplot(fig)
@@ -632,40 +579,40 @@ elif menu == "🎯 Aktual vs Prediksi":
 # ══════════════════════════════════════════════
 elif menu == "📊 Evaluasi Model":
     st.title("📊 Evaluasi Model Random Forest Regression")
+    st.caption("Dihitung berdasarkan data aktif saat ini.")
 
-    # Tabel evaluasi
+    if len(df) < 40:
+        st.warning("⚠️ Data aktif terlalu sedikit untuk menghitung evaluasi yang representatif.")
+        st.stop()
+
     rekap_rows = []
+    mae_vals, rmse_vals, mape_vals = [], [], []
     for jenis in jenis_beras:
+        hasil = hitung_metrik(df, jenis)
+        if hasil is None:
+            continue
         rekap_rows.append({
             'Jenis Beras' : label_bersih[jenis],
-            'MAE (Rp)'    : f"Rp{models[jenis]['MAE']:,.2f}",
-            'RMSE (Rp)'   : f"Rp{models[jenis]['RMSE']:,.2f}",
-            'MAPE (%)'    : f"{models[jenis]['MAPE']:.2f}%",
+            'MAE (Rp)'    : f"Rp{hasil['MAE']:,.2f}",
+            'RMSE (Rp)'   : f"Rp{hasil['RMSE']:,.2f}",
+            'MAPE (%)'    : f"{hasil['MAPE']:.2f}%",
         })
+        mae_vals.append(hasil['MAE']); rmse_vals.append(hasil['RMSE']); mape_vals.append(hasil['MAPE'])
+
     st.subheader("Rekapitulasi Evaluasi")
-    st.dataframe(pd.DataFrame(rekap_rows),
-                 use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(rekap_rows), use_container_width=True, hide_index=True)
 
-    # Kartu metrik rata-rata
     st.divider()
-    mape_vals = [models[j]['MAPE'] for j in jenis_beras]
-    mae_vals  = [models[j]['MAE']  for j in jenis_beras]
-    rmse_vals = [models[j]['RMSE'] for j in jenis_beras]
-
     col1, col2, col3 = st.columns(3)
     col1.metric("Rata-rata MAE",  f"Rp{np.mean(mae_vals):,.2f}")
     col2.metric("Rata-rata RMSE", f"Rp{np.mean(rmse_vals):,.2f}")
     col3.metric("Rata-rata MAPE", f"{np.mean(mape_vals):.2f}%")
 
     st.divider()
-
-    # Bar chart MAE, RMSE, MAPE
-    labels = [label_bersih[j] for j in jenis_beras]
+    labels = [label_bersih[j] for j in jenis_beras if hitung_metrik(df, j) is not None]
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-
     for ax, vals, color, title in zip(
-        axes,
-        [mae_vals, rmse_vals, mape_vals],
+        axes, [mae_vals, rmse_vals, mape_vals],
         ['#42A5F5', '#FFA726', '#EC407A'],
         ['MAE (Rp)', 'RMSE (Rp)', 'MAPE (%)']
     ):
@@ -678,9 +625,7 @@ elif menu == "📊 Evaluasi Model":
             label_val = f'Rp{v:,.0f}' if 'Rp' in title else f'{v:.2f}%'
             ax.text(bar.get_x() + bar.get_width()/2, v + (max(vals)*0.01),
                     label_val, ha='center', fontsize=9)
-
-    plt.suptitle('Perbandingan Evaluasi Model — 6 Jenis Beras',
-                 fontsize=14, fontweight='bold')
+    plt.suptitle('Perbandingan Evaluasi Model', fontsize=14, fontweight='bold')
     plt.tight_layout()
     st.pyplot(fig)
     plt.close()
@@ -691,46 +636,39 @@ elif menu == "📊 Evaluasi Model":
 # ══════════════════════════════════════════════
 elif menu == "🔮 Prediksi ke Depan":
     st.title("🔮 Prediksi Harga Beras ke Depan")
+
+    if len(df) < 31:
+        st.warning("⚠️ Data aktif kurang dari 31 hari, prediksi mungkin tidak dapat dihitung.")
+        st.stop()
+
     st.caption(f"Prediksi dihitung mulai {(df['tanggal'].iloc[-1] + timedelta(days=1)).strftime('%d %B %Y')}")
 
     col1, col2 = st.columns(2)
     with col1:
-        jenis_pilih = st.selectbox("Pilih jenis beras:",
-                                    jenis_beras,
+        jenis_pilih = st.selectbox("Pilih jenis beras:", jenis_beras,
                                     format_func=lambda x: label_bersih[x])
     with col2:
-        n_hari = st.slider("Jumlah hari prediksi:", min_value=7,
-                           max_value=30, value=30, step=1)
+        n_hari = st.slider("Jumlah hari prediksi:", min_value=7, max_value=30, value=30, step=1)
 
     if st.button("🔮 Jalankan Prediksi", type="primary"):
-        model        = models[jenis_pilih]['model']
-        fitur        = models[jenis_pilih]['fitur']
-        future_dates, future_preds = prediksi_ke_depan(
-            df, jenis_pilih, model, fitur, n_hari=n_hari
-        )
+        model = models[jenis_pilih]['model']
+        fitur = models[jenis_pilih]['fitur']
+        future_dates, future_preds = prediksi_ke_depan(df, jenis_pilih, model, fitur, n_hari=n_hari)
 
-        # Grafik
         fig, ax = plt.subplots(figsize=(14, 5))
         ax.plot(df['tanggal'].iloc[-60:], df[jenis_pilih].iloc[-60:],
                 label='Historis', color='#1565C0', linewidth=2)
-        ax.plot(future_dates, future_preds,
-                label=f'Prediksi {n_hari} hari ke depan',
-                color='#EF6C00', linewidth=2,
-                linestyle='--', marker='o', markersize=4)
-        ax.axvline(df['tanggal'].iloc[-1], color='gray',
-                   linestyle=':', linewidth=1.5, label='Akhir data')
-        ax.set_title(
-            f'Prediksi {n_hari} Hari ke Depan — {label_bersih[jenis_pilih]}',
-            fontsize=13, fontweight='bold')
-        ax.set_xlabel('Tanggal')
-        ax.set_ylabel('Harga (Rp/kg)')
-        ax.legend()
-        ax.grid(axis='y', alpha=0.3)
+        ax.plot(future_dates, future_preds, label=f'Prediksi {n_hari} hari ke depan',
+                color='#EF6C00', linewidth=2, linestyle='--', marker='o', markersize=4)
+        ax.axvline(df['tanggal'].iloc[-1], color='gray', linestyle=':', linewidth=1.5, label='Akhir data')
+        ax.set_title(f'Prediksi {n_hari} Hari ke Depan — {label_bersih[jenis_pilih]}',
+                     fontsize=13, fontweight='bold')
+        ax.set_xlabel('Tanggal'); ax.set_ylabel('Harga (Rp/kg)')
+        ax.legend(); ax.grid(axis='y', alpha=0.3)
         plt.tight_layout()
         st.pyplot(fig)
         plt.close()
 
-        # Tabel prediksi
         st.divider()
         st.subheader("Tabel Hasil Prediksi")
         df_pred = pd.DataFrame({
@@ -739,21 +677,12 @@ elif menu == "🔮 Prediksi ke Depan":
         })
         st.dataframe(df_pred, use_container_width=True, hide_index=True)
 
-        # Download
         csv = df_pred.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            "⬇️ Download Hasil Prediksi (CSV)",
-            csv,
-            f"prediksi_{jenis_pilih}_{n_hari}hari.csv",
-            "text/csv"
-        )
+        st.download_button("⬇️ Download Hasil Prediksi (CSV)", csv,
+                           f"prediksi_{jenis_pilih}_{n_hari}hari.csv", "text/csv")
 
-        # Ringkasan
         st.divider()
         col1, col2, col3 = st.columns(3)
-        col1.metric("Harga Terakhir (historis)",
-                    f"Rp{df[jenis_pilih].iloc[-1]:,.0f}")
-        col2.metric("Prediksi Hari Pertama",
-                    f"Rp{future_preds[0]:,.0f}")
-        col3.metric(f"Prediksi Hari ke-{n_hari}",
-                    f"Rp{future_preds[-1]:,.0f}")
+        col1.metric("Harga Terakhir (historis)", f"Rp{df[jenis_pilih].iloc[-1]:,.0f}")
+        col2.metric("Prediksi Hari Pertama", f"Rp{future_preds[0]:,.0f}")
+        col3.metric(f"Prediksi Hari ke-{n_hari}", f"Rp{future_preds[-1]:,.0f}")
