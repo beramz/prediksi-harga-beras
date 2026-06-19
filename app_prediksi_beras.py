@@ -118,7 +118,7 @@ with st.sidebar:
         "🔮 Prediksi ke Depan",
     ])
     st.divider()
-    st.caption("Bramadita Rahardiyan Purnama\n220103196 | 2025")
+    st.caption("Bramadita Rahardiyan Purnama\n220103196 | 2026")
 
 
 # ══════════════════════════════════════════════
