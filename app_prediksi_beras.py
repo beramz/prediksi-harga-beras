@@ -51,6 +51,79 @@ warna = {
 }
 
 # ─────────────────────────────────────────────
+# DETEKSI & TRANSPOSE FORMAT PIHPS (HORIZONTAL)
+# ─────────────────────────────────────────────
+def deteksi_format_horizontal(df_mentah):
+    """
+    Mendeteksi apakah file berformat horizontal ala PIHPS
+    (tanggal ada di kolom/header, jenis beras ada di baris).
+    """
+    kolom_wajib = ['tanggal', 'bawah_1', 'bawah_2',
+                   'medium_1', 'medium_2', 'super_1', 'super_2']
+    kolom_vertikal_ada = all(k in df_mentah.columns for k in kolom_wajib)
+    if kolom_vertikal_ada:
+        return False
+
+    # Cek apakah baris pertama berisi pola nama beras PIHPS
+    teks_gabungan = df_mentah.astype(str).apply(lambda x: ' '.join(x), axis=1).str.lower()
+    pola_beras = ['bawah', 'medium', 'super', 'beras']
+    cocok = teks_gabungan.str.contains('|'.join(pola_beras)).sum()
+    return cocok >= 2
+
+
+def transpose_format_pihps(df_mentah):
+    """
+    Mengubah data horizontal PIHPS (tanggal di header, jenis beras di baris)
+    menjadi format vertikal (tanggal di baris, jenis beras di kolom).
+    """
+    df_raw = pd.read_excel(df_mentah, header=None, engine='openpyxl') \
+        if hasattr(df_mentah, 'read') and df_mentah.name.endswith('.xlsx') \
+        else df_mentah
+
+    # Cari baris header tanggal — baris yang punya format dd/mm/yyyy terbanyak
+    baris_tanggal_idx = None
+    for i in range(min(5, len(df_raw))):
+        baris = df_raw.iloc[i].astype(str)
+        n_match = baris.str.match(r'^\d{1,2}/?\s?\d{1,2}/?\s?\d{2,4}$').sum()
+        if n_match >= 3:
+            baris_tanggal_idx = i
+            break
+    if baris_tanggal_idx is None:
+        baris_tanggal_idx = 0
+
+    # Cari kolom mulai data tanggal (lewati kolom No & Komoditas)
+    kolom_mulai = 2
+    for c in range(min(5, df_raw.shape[1])):
+        val = str(df_raw.iloc[baris_tanggal_idx, c])
+        if '/' in val or '-' in val:
+            kolom_mulai = c
+            break
+
+    tanggal_raw = df_raw.iloc[baris_tanggal_idx, kolom_mulai:].tolist()
+    tanggal = pd.to_datetime(tanggal_raw, dayfirst=True, errors='coerce')
+
+    # Cari baris tiap jenis beras berdasarkan nama
+    mapping_nama = {
+        'bawah i'  : 'bawah_1', 'bawah ii' : 'bawah_2',
+        'medium i' : 'medium_1', 'medium ii': 'medium_2',
+        'super i'  : 'super_1', 'super ii' : 'super_2',
+    }
+    hasil = {'tanggal': tanggal}
+    for i in range(len(df_raw)):
+        nama_baris = str(df_raw.iloc[i, 1]).strip().lower()
+        for key, kolom in mapping_nama.items():
+            if key in nama_baris:
+                nilai_raw = df_raw.iloc[i, kolom_mulai:].tolist()
+                nilai_bersih = [str(v).replace(',', '').strip()
+                                if v is not None else None for v in nilai_raw]
+                hasil[kolom] = pd.to_numeric(nilai_bersih, errors='coerce')
+
+    df_vertikal = pd.DataFrame(hasil)
+    df_vertikal = df_vertikal.dropna(subset=['tanggal']).reset_index(drop=True)
+    return df_vertikal
+
+
+# ─────────────────────────────────────────────
 # FEATURE ENGINEERING
 # ─────────────────────────────────────────────
 def buat_fitur(df, kolom_target):
@@ -200,13 +273,42 @@ elif menu == "📂 Upload Data Excel/CSV":
 
     if uploaded_file:
         try:
-            # ── TAHAP 1: Preview data mentah ──
+            # ── TAHAP 0: Baca file & deteksi format ──
             if uploaded_file.name.endswith('.csv'):
-                df_mentah = pd.read_csv(uploaded_file)
+                df_cek = pd.read_csv(uploaded_file, header=None)
             else:
-                df_mentah = pd.read_excel(uploaded_file)
+                df_cek = pd.read_excel(uploaded_file, header=None, engine='openpyxl')
 
-            st.markdown("### 📋 Tahap 1 — Preview Data Mentah")
+            format_horizontal = deteksi_format_horizontal(
+                pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv')
+                else pd.read_excel(uploaded_file)
+            )
+
+            if format_horizontal:
+                st.info("🔄 Terdeteksi format data horizontal (gaya PIHPS — tanggal di kolom, "
+                        "jenis beras di baris). Data akan ditransformasi ke format vertikal secara otomatis.")
+                uploaded_file.seek(0)
+                if uploaded_file.name.endswith('.xlsx'):
+                    df_mentah = transpose_format_pihps(uploaded_file)
+                else:
+                    # Untuk CSV horizontal, baca dulu sebagai raw lalu transpose manual
+                    df_raw_csv = pd.read_csv(uploaded_file, header=None)
+                    tmp_path = "_tmp_upload.xlsx"
+                    df_raw_csv.to_excel(tmp_path, header=False, index=False)
+                    with open(tmp_path, 'rb') as f:
+                        df_mentah = transpose_format_pihps(f)
+
+                st.success(f"✅ Berhasil ditransformasi ke format vertikal: {len(df_mentah)} baris, "
+                           f"{len(df_mentah.columns)} kolom")
+            else:
+                uploaded_file.seek(0)
+                if uploaded_file.name.endswith('.csv'):
+                    df_mentah = pd.read_csv(uploaded_file)
+                else:
+                    df_mentah = pd.read_excel(uploaded_file)
+
+            # ── TAHAP 1: Preview data ──
+            st.markdown("### 📋 Tahap 1 — Preview Data")
             st.caption(f"Total baris: {len(df_mentah)} | Total kolom: {len(df_mentah.columns)}")
             st.dataframe(df_mentah.head(10), use_container_width=True, hide_index=True)
 
