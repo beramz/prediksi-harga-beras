@@ -438,10 +438,10 @@ elif menu == "📂 Upload Data Excel/CSV":
 
 
 # ══════════════════════════════════════════════
-# 3. INPUT DATA MANUAL
+# 3. Cari prediksi
 # ══════════════════════════════════════════════
-elif menu == "✏️ Input Data Manual":
-    st.title("✏️ Input Data Manual")
+elif menu == "🔍 Cari prediksi":
+    st.title("🔍 Cari prediksi")
     st.caption("Pilih jenis beras dan tanggal untuk mendapatkan prediksi harga, berdasarkan data aktif saat ini.")
 
     if len(df) < 31:
