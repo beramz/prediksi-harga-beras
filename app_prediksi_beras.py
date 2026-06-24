@@ -322,22 +322,6 @@ elif menu == "📂 Upload Data Excel/CSV":
     st.title("📂 Upload Data Excel/CSV")
     st.caption("Data yang diupload di sini akan menjadi data acuan untuk SEMUA menu di aplikasi ini.")
 
-    st.markdown("#### Format file yang diperlukan:")
-    df_contoh = pd.DataFrame({
-        'tanggal'  : ['2025-01-01', '2025-01-02', '2025-01-03'],
-        'bawah_1'  : [13200, 13250, 13200],
-        'bawah_2'  : [13000, 12350, 13000],
-        'medium_1' : [15050, 15100, 15050],
-        'medium_2' : [14150, 13950, 14150],
-        'super_1'  : [18050, 18250, 18050],
-        'super_2'  : [16450, 14500, 16450],
-    })
-    st.dataframe(df_contoh, use_container_width=True, hide_index=True)
-    csv_template = df_contoh.to_csv(index=False).encode('utf-8')
-    st.download_button("⬇️ Download Template CSV", csv_template,
-                       "template_data_beras.csv", "text/csv")
-    st.caption("Format horizontal ala PIHPS (tanggal di kolom, jenis beras di baris) juga didukung dan akan ditransformasi otomatis.")
-
     st.divider()
     uploaded_file = st.file_uploader("Upload file di sini", type=["xlsx", "csv"])
 
